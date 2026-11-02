@@ -198,3 +198,45 @@ resolves them, without retaining the other hunks unnecessarily.
 - Retirement: carry these regressions with the ST-API-002 replacement; remove
   this correction only when an equivalent upstream API releases both the owned
   direction and retained receive storage under the same cancellation orderings.
+
+### ST-PERF-002 — bounded 128KiB socket download batches
+
+- Status: active local performance parameter, not an upstream bug claim.
+- Location: `stack_go_splice.go`, `goSpliceReadChunk`, 64KiB to 128KiB. The
+  existing `writeBudget`, congestion/window, transmit-capacity and memory-share
+  limits still bound every read. Socket ownership and EOF handling are unchanged.
+- Evidence: Xray experiment run `41500278151`, source
+  `20dbdaa46db10f46e63118f3b00c23878bb101c3`, compares dependency overlays at
+  64/128/256KiB on the same Linux x86-64 runner, Go 1.27.3, GOMAXPROCS=4,
+  actual MTU 9000. Five randomized repetitions cover nine bulk cases and four
+  mixed-flow cases; all 195 rows require native handoff and payload verification.
+- Paired 128KiB versus 64KiB medians: plain download throughput +9.93% with
+  whole-process CPU/4MiB -6.11%; Vision download CPU -3.82%. Four-flow TLS direct
+  and Vision throughput improve +7.53%/+6.97%, with the slowest flow
+  +7.44%/+6.52% and Jain index at least 0.9997. Single-flow TLS throughput has
+  no general improvement; direct TLS download is -2.47% in the paired median.
+  These process measurements include application TLS and the local Vision node,
+  and do not establish Android throughput, VPN CPU attribution or battery savings.
+- Latency tradeoff: 128KiB mixed four-flow p99 changes +0.34%/+3.06% in paired
+  medians, with samples in both directions. Single-flow Vision worst probe gap
+  increases from a 3.511ms median to 4.514ms. The chosen batch is not a claim
+  that every latency improves. 256KiB is rejected: its TLS-direct four-flow p95
+  increases in all five repetitions (paired median +6.28%), and both single-flow
+  TLS probe medians increase in all five repetitions.
+- Regression: `TestGoDownloadSpliceReadBatchBudget` queues a real socket payload
+  above 64KiB, checks an individual larger read when budget permits, and retains
+  smaller-capacity backpressure, byte ordering, counters and one EOF completion.
+  Existing zero-window, directional, download/full-Splice, vector, jumbo and
+  memory tests remain required before pinning this dependency.
+- Local validation: the new socket regression passes on macOS arm64 with
+  `-race -count=10`; restoring only the 64KiB constant through an overlay fails
+  its large-read assertion. Directional, download/full-Splice, local-jumbo and
+  vector tests pass with `-race -count=3`; `go vet .` and Linux amd64/Windows
+  amd64 test-binary compilation pass. Not run: `TestGoMemory*` runtime checks on
+  this Mac; their real utun setup returns `Connect: operation not permitted`.
+  The Linux privileged CI step includes these memory cases and must pass before
+  this dependency is treated as validated for the app.
+- Retirement: compare future upstream batch selection and retain its implementation
+  when equivalent ownership, bounds and measured tradeoffs pass these controls.
+  Prefer an upstream improvement over preserving this constant; record replacement
+  revision and remove only the local parameter hunk after revalidation.

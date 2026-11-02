@@ -17,7 +17,8 @@ import (
 const (
 	goSocketEventBatch = 64
 	goSpliceTokenShift = 8
-	goSpliceReadChunk  = 2 * goSlabSize
+	// The socket batch remains bounded by the existing window and capacity budget.
+	goSpliceReadChunk = 4 * goSlabSize
 )
 
 type SpliceSocket interface {

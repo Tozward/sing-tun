@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -243,6 +244,89 @@ func TestGoDownloadSpliceBackpressure(t *testing.T) {
 	conn.engine.spliceReadPeer(conn)
 	if counted != 64 || conn.bufferedTail.Load() != 65 {
 		t.Fatalf("resumed downstream payload: count=%d buffered=%d", counted, conn.bufferedTail.Load())
+	}
+}
+
+func TestGoDownloadSpliceReadBatchBudget(t *testing.T) {
+	for _, capacity := range []int{goSlabSize, 8 * goSlabSize} {
+		t.Run(fmt.Sprint(capacity), func(t *testing.T) {
+			conn, platform := newDownloadSpliceTestConn(t)
+			conn.transmitCapacity = uint64(capacity)
+			conn.sendPermit.Store(1 + 8*goSlabSize)
+			conn.sendPacketPermit.Store(1 << 16)
+			source, peer := downloadSpliceSocketPair(t)
+			if err := source.SetReadBuffer(16 * goSlabSize); err != nil {
+				t.Fatal(err)
+			}
+			payload := kernelPayload(3*goSlabSize, 113)
+			if _, err := peer.Write(payload); err != nil {
+				t.Fatal(err)
+			}
+			// Queue more than the former batch before handing off, so individual
+			// counter callbacks distinguish one large read from repeated small ones.
+			control, err := source.SyscallConn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			peek := make([]byte, len(payload))
+			directionalSpliceWait(t, func() bool {
+				n := 0
+				var readErr error
+				if err := control.Control(func(fd uintptr) {
+					n, _, readErr = unix.Recvfrom(int(fd), peek, unix.MSG_PEEK|unix.MSG_DONTWAIT)
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if readErr != nil && !errors.Is(readErr, unix.EAGAIN) && !errors.Is(readErr, unix.EWOULDBLOCK) {
+					t.Fatal(readErr)
+				}
+				return n == len(payload)
+			}, func() {})
+			if err := peer.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			var counted, largest int64
+			finished := make(chan error, 2)
+			if !conn.SpliceDownload(source, DownloadSpliceOptions{
+				WriteCounters: []N.CountFunc{func(n int64) {
+					counted += n
+					largest = max(largest, n)
+				}},
+				OnReadDone: func(err error) { finished <- err },
+			}) {
+				t.Fatal("download splice refused")
+			}
+			conn.engine.drainControlQueue()
+			var received []byte
+			directionalSpliceWait(t, func() bool { return len(finished) > 0 }, func() {
+				before := conn.bufferedTail.Load()
+				conn.engine.spliceReadPeer(conn)
+				after := conn.bufferedTail.Load()
+				received = append(received, bytes.Join(conn.transmitStore.appendRuns(nil, before, int(after-before)), nil)...)
+				if conn.splice != nil && conn.splice.readStalled {
+					if platform.interest&goInterestRead != 0 || after-conn.sendReleased.Load() > uint64(capacity) {
+						t.Fatal("backpressure exceeded storage budget or kept read interest")
+					}
+					conn.sendUnacked.Store(after)
+					conn.releaseTransmitted(after)
+					conn.engine.spliceResume(conn)
+				}
+			})
+			directionalSpliceDone(t, finished, false)
+			if counted != int64(len(payload)) || !bytes.Equal(received, payload) {
+				t.Fatalf("batch transfer lost bytes: count=%d received=%d", counted, len(received))
+			}
+			if largest > int64(capacity) || capacity > 2*goSlabSize && largest <= 2*goSlabSize {
+				t.Fatalf("socket read did not respect its batch/capacity budget: largest=%d capacity=%d", largest, capacity)
+			}
+			if capacity == goSlabSize && conn.transmitStore.chain.held.Load() != 0 {
+				t.Fatal("acknowledged small-budget batches retained transmit slabs after EOF")
+			}
+			conn.engine.spliceDetach(conn, net.ErrClosed)
+			if len(finished) != 0 {
+				t.Fatal("batch EOF completed more than once")
+			}
+		})
 	}
 }
 

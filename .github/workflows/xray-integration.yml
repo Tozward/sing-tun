@@ -29,4 +29,4 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           go test -race -c -o native-test .
-          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-test -test.v -test.run 'TestNativeTunOwned|TestGoKernelDownloadSplice|TestGoKernelDirectionalSplice|TestGoKernelLocalJumbo' -test.count=3 -test.timeout=5m
+          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-test -test.v -test.run 'TestNativeTunOwned|TestGoKernelDownloadSplice|TestGoKernelDirectionalSplice|TestGoKernelLocalJumbo|TestGoMemory' -test.count=3 -test.timeout=5m
