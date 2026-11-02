@@ -979,8 +979,7 @@ func (e *goEngine) maybeSendFin(conn *GoConn) {
 
 func (e *goEngine) handleCloseRequest(conn *GoConn) {
 	conn.access.Lock()
-	pending := conn.splicePending
-	abort := conn.abort || pending != nil && !pending.downloadOnly
+	abort := conn.abort || conn.splicePending != nil
 	discard := conn.userClosed || conn.abort
 	if conn.dead && discard {
 		conn.drainable = false
@@ -1005,9 +1004,6 @@ func (e *goEngine) handleCloseRequest(conn *GoConn) {
 			e.rearmTimer(conn)
 		}
 		return
-	}
-	if !abort && (pending != nil && pending.downloadOnly || conn.splice != nil && conn.splice.downloadOnly) {
-		e.spliceDetach(conn, net.ErrClosed)
 	}
 	if abort || conn.splice != nil {
 		e.sendReset(conn)

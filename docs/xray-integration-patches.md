@@ -103,6 +103,21 @@ and lifetime regressions pass. Similar names or a bidirectional Splice API alone
 are not sufficient equivalence. Record the replacement revision and remove the
 local API only with the coordinated Xray caller update.
 
+Release audit (2026-11-03): ST-API-002 now implements this public download API.
+The former non-directional, download-only pending/active implementation has no
+remaining constructor or caller. Its `finishDownloadRead` and corresponding
+full-Splice error/close branches are removed; `SpliceDownload` and its external
+contract remain available. `splicePending` again represents only full ownership,
+while directional requests use `goDirectionalSpliceState`. The remaining
+`downloadOnly` flag describes an active directional stream without an upload
+handoff; it is not a second API implementation. Full/directional reservation,
+half-close, EOF and cancellation regressions cover the unified implementation.
+Local validation of this cleanup: the complete focused macOS arm64 race suite
+passes three repetitions; concentrated engage/close/reservation/concurrent-fallback
+race checks pass 30 repetitions. `go vet .`, Linux amd64 and Windows amd64 test
+compilation, and Android arm64 package compilation pass. Privileged Linux and
+Android runtime checks are required on the final release pin.
+
 ### ST-API-002 — independently ready upload and download
 
 - Status: active local extension, not an upstream bug-fix claim.

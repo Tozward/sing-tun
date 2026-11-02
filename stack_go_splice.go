@@ -234,18 +234,9 @@ func (e *goEngine) handleSpliceEngage(conn *GoConn) {
 		e.spliceRelease(splice, conn.closeError())
 		return
 	}
-	if splice.downloadOnly {
-		conn.access.Lock()
-		cancelled := conn.userClosed || conn.abort || conn.finRequested
-		conn.access.Unlock()
-		if cancelled {
-			e.spliceRelease(splice, net.ErrClosed)
-			return
-		}
-	}
 	splice.token = e.allocateSpliceToken(conn, nil)
 	var err error
-	if goSpliceDuplicatesSocket && !splice.downloadOnly {
+	if goSpliceDuplicatesSocket {
 		err = splice.original.Close()
 	}
 	if err == nil {
@@ -262,9 +253,7 @@ func (e *goEngine) handleSpliceEngage(conn *GoConn) {
 	conn.access.Lock()
 	conn.spliced = true
 	conn.access.Unlock()
-	if !splice.downloadOnly {
-		e.spliceFlushUpload(conn)
-	}
+	e.spliceFlushUpload(conn)
 }
 
 func (e *goEngine) spliceRelease(splice *goSpliceStream, err error) {
@@ -276,13 +265,6 @@ func (e *goEngine) spliceRelease(splice *goSpliceStream, err error) {
 		}
 		if done := splice.onWriteDone; done != nil {
 			splice.onWriteDone = nil
-			done(err)
-		}
-		return
-	}
-	if splice.downloadOnly {
-		if done := splice.onReadDone; done != nil {
-			splice.onReadDone = nil
 			done(err)
 		}
 		return
@@ -533,10 +515,6 @@ func (e *goEngine) spliceReadPeer(conn *GoConn) {
 				e.finishDirectionalDownload(conn, nil)
 				return
 			}
-			if splice.downloadOnly {
-				e.finishDownloadRead(conn, splice)
-				return
-			}
 			splice.downloadClosed = true
 			e.spliceSetInterest(conn, splice.interest&^goInterestRead)
 			if conn.splice == nil {
@@ -559,25 +537,6 @@ func (e *goEngine) spliceReadPeer(conn *GoConn) {
 	}
 	e.maybeSendFin(conn)
 	e.spliceMaybeFinish(conn)
-}
-
-func (e *goEngine) finishDownloadRead(conn *GoConn, splice *goSpliceStream) {
-	// Finish the downstream half independently: upload remains with the caller
-	// and must not wait for this connection's FIN or the source socket to close.
-	done := splice.onReadDone
-	splice.onReadDone = nil
-	conn.access.Lock()
-	conn.finRequested = true
-	conn.access.Unlock()
-	conn.finPending = true
-	e.spliceDetach(conn, nil)
-	// Linux may still have buffered data waiting for the native transmitter.
-	// Resume its ordinary path after detaching the engine socket reader.
-	conn.transmitPublished()
-	e.maybeSendFin(conn)
-	if done != nil {
-		done(nil)
-	}
 }
 
 func (e *goEngine) spliceTransmit(conn *GoConn) bool {
