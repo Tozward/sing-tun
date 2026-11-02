@@ -4,6 +4,7 @@ package stopfd
 
 import (
 	"fmt"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -15,7 +16,13 @@ type StopFD struct {
 
 func New() (StopFD, error) {
 	fds := make([]int, 2)
+	syscall.ForkLock.RLock()
 	err := unix.Pipe(fds)
+	if err == nil {
+		unix.CloseOnExec(fds[0])
+		unix.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return StopFD{ReadFD: -1, WriteFD: -1}, fmt.Errorf("failed to create pipe: %w", err)
 	}

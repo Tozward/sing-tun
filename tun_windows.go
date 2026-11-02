@@ -69,7 +69,7 @@ func New(options Options) (WinTun, error) {
 	}
 	session, err := adapter.StartSession(0x800000)
 	if err != nil {
-		return nil, err
+		return nil, E.Errors(err, adapter.Close())
 	}
 	nativeTun.session = session
 	nativeTun.readWait = session.ReadWaitEvent()

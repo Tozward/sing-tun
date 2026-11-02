@@ -97,38 +97,52 @@ func (t *NativeTun) Name() (string, error) {
 	)
 }
 
-func New(options Options) (Tun, error) {
+func New(options Options) (device Tun, err error) {
 	var tunFd int
 	batchSize := ((512 * 1024) / int(options.MTU)) + 1
 	if options.FileDescriptor == 0 {
 		ifIndex := -1
-		_, err := fmt.Sscanf(options.Name, "utun%d", &ifIndex)
+		_, err = fmt.Sscanf(options.Name, "utun%d", &ifIndex)
 		if err != nil {
 			return nil, E.New("bad tun name: ", options.Name)
 		}
 
+		syscall.ForkLock.RLock()
 		tunFd, err = unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, 2)
+		if err == nil {
+			unix.CloseOnExec(tunFd)
+		}
+		syscall.ForkLock.RUnlock()
 		if err != nil {
 			return nil, err
 		}
+		defer func() {
+			if err != nil {
+				err = E.Errors(err, unix.Close(tunFd))
+			}
+		}()
 
 		err = create(tunFd, ifIndex, options.Name, options)
 		if err != nil {
-			unix.Close(tunFd)
-			return nil, err
-		}
-		err = configure(tunFd, options.EXP_MultiPendingPackets, int(options.MTU))
-		if err != nil {
-			unix.Close(tunFd)
 			return nil, err
 		}
 	} else {
 		tunFd = options.FileDescriptor
-		err := configure(tunFd, options.EXP_MultiPendingPackets, int(options.MTU))
-		if err != nil {
-			return nil, err
-		}
 	}
+	err = configure(tunFd, options.EXP_MultiPendingPackets, int(options.MTU))
+	if err != nil {
+		return nil, err
+	}
+	stopFd, err := stopfd.New()
+	if err != nil {
+		return nil, E.Cause(err, "create stop pipe")
+	}
+	readPoller, err := rawfile.NewPoller(stopFd.ReadFD, tunFd)
+	if err != nil {
+		return nil, E.Errors(E.Cause(err, "create read poller"), stopFd.Close())
+	}
+	// The caller retains a supplied descriptor on construction failure. Only
+	// register its os.File owner after all fallible descriptor setup succeeds.
 	nativeTun := &NativeTun{
 		tunFd:         tunFd,
 		tunFile:       os.NewFile(uintptr(tunFd), "utun"),
@@ -138,10 +152,10 @@ func New(options Options) (Tun, error) {
 		iovecsOutput:  make([]iovecBuffer, batchSize),
 		msgHdrs:       make([]rawfile.MsgHdrX, batchSize),
 		msgHdrsOutput: make([]rawfile.MsgHdrX, batchSize),
-		stopFd:        common.Must1(stopfd.New()),
+		stopFd:        stopFd,
+		readPoller:    readPoller,
 		sendMsgX:      options.EXP_SendMsgX,
 	}
-	nativeTun.readPoller = common.Must1(rawfile.NewPoller(nativeTun.stopFd.ReadFD, tunFd))
 	for i := range batchSize {
 		nativeTun.iovecs[i] = newIovecBuffer(int(options.MTU))
 		nativeTun.iovecsOutput[i] = newIovecBuffer(int(options.MTU))
@@ -586,7 +600,12 @@ func (t *NativeTun) unsetRoutes() error {
 }
 
 func useSocket(domain, typ, proto int, block func(socketFd int) error) error {
+	syscall.ForkLock.RLock()
 	socketFd, err := unix.Socket(domain, typ, proto)
+	if err == nil {
+		unix.CloseOnExec(socketFd)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return err
 	}

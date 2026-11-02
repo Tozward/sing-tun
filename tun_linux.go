@@ -70,7 +70,7 @@ func New(options Options) (Tun, error) {
 			}
 			err = nativeTun.configure(tunLink)
 			if err != nil {
-				return nil, E.Errors(err, unix.Close(tunFd))
+				return nil, E.Errors(err, nativeTun.tunFile.Close())
 			}
 			return nativeTun, nil
 		})
@@ -127,7 +127,7 @@ func open(name string, vnetHdr bool, multiQueue bool) (int, bool, error) {
 }
 
 func openTun(name string, flags int) (int, error) {
-	fd, err := unix.Open(controlPath, unix.O_RDWR, 0)
+	fd, err := unix.Open(controlPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, E.Cause(err, "open ", controlPath)
 	}
