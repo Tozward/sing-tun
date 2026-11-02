@@ -307,6 +307,7 @@ func (e *goEngine) inputPacketTooBig(embedded *embeddedPacket, mtu int) {
 	if offset < int64(conn.sendUnacked.Load()) || offset >= int64(conn.sendNext()) {
 		return
 	}
+	conn.disableLocalJumbo()
 	if conn.ipVersion == 4 {
 		mtu = max(mtu, header.IPv4MinimumProcessableDatagramSize)
 	} else {

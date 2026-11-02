@@ -40,6 +40,33 @@ func goSpliceSocket(conn syscall.Conn) (goSocket, error) {
 	return goSocket{fd: fd}, nil
 }
 
+func goDirectionalSocket(conn syscall.Conn) (goSocket, error) {
+	fd, err := control.Conn0[int](conn, func(fd uintptr) (int, error) {
+		kind, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_TYPE)
+		if err != nil {
+			return -1, err
+		}
+		if kind != unix.SOCK_STREAM {
+			return -1, E.New("go: directional splice requires a stream socket")
+		}
+		flags, err := unix.FcntlInt(fd, unix.F_GETFL, 0)
+		if err != nil {
+			return -1, err
+		}
+		if flags&unix.O_NONBLOCK == 0 {
+			return -1, E.New("go: directional splice requires a nonblocking socket")
+		}
+		if _, err := unix.Getpeername(int(fd)); err != nil {
+			return -1, err
+		}
+		return unix.FcntlInt(fd, unix.F_DUPFD_CLOEXEC, 3)
+	})
+	if err != nil {
+		return goSocket{}, err
+	}
+	return goSocket{fd: fd}, nil
+}
+
 func (s *goSocket) close() {
 	if s.fd < 0 {
 		return

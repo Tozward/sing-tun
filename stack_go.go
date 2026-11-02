@@ -37,6 +37,8 @@ type Go struct {
 	engines                []*goEngine
 	closed                 atomic.Bool
 	validateChecksum       bool
+	tcpLocalJumbo          bool
+	localJumboAddresses    []netip.Addr
 }
 
 func NewGo(options StackOptions) (*Go, error) {
@@ -64,6 +66,7 @@ func NewGo(options StackOptions) (*Go, error) {
 			InterfaceFinder: options.InterfaceFinder,
 		},
 		memoryPressure: options.MemoryPressure,
+		tcpLocalJumbo:  options.TCPLocalJumbo,
 		directory: goFlowDirectory{
 			flows:      make(map[flowKey]*GoConn),
 			udpSockets: make(map[netip.AddrPort]*GoUDPConn),
@@ -71,6 +74,14 @@ func NewGo(options StackOptions) (*Go, error) {
 			tcpLocals:  make(map[netip.AddrPort]uint32),
 			reserved:   make(map[goPortKey]struct{}),
 		},
+	}
+	if options.TCPLocalJumbo {
+		for _, prefix := range options.TunOptions.Inet4Address {
+			stack.localJumboAddresses = append(stack.localJumboAddresses, prefix.Addr())
+		}
+		for _, prefix := range options.TunOptions.Inet6Address {
+			stack.localJumboAddresses = append(stack.localJumboAddresses, prefix.Addr())
+		}
 	}
 	memoryTun, isMemoryTun := options.Tun.(*MemoryTun)
 	if isMemoryTun {

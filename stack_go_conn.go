@@ -278,6 +278,7 @@ type GoConn struct {
 	transmitterRunning bool
 	err                error
 	splicePending      *goSpliceStream
+	directionalSplice  *goDirectionalSpliceState
 	establishedSignal  chan struct{}
 	finAckedSignal     chan struct{}
 	closeSignal        chan struct{}
@@ -297,6 +298,8 @@ type GoConn struct {
 	keepaliveMessage   goMessage
 	transmittedMessage goMessage
 	slabHolder         goSlabHolder
+	localJumbo         bool
+	localJumboDisabled atomic.Bool
 }
 
 func (c *GoConn) initialize(engine *goEngine, key flowKey, peer M.Socksaddr, local M.Socksaddr) {
@@ -304,6 +307,7 @@ func (c *GoConn) initialize(engine *goEngine, key flowKey, peer M.Socksaddr, loc
 	c.key = key
 	c.peer = peer
 	c.local = local
+	c.localJumbo = engine.stack.localJumboPeer(peer.Addr, engine.platformIO)
 	c.epoch = engine.coarseTime.Load()
 	c.lastSendStamp = -1
 	c.readDeadline = pipe.MakeDeadline()
@@ -594,12 +598,15 @@ func (c *GoConn) readLocked(p []byte) (int, error) {
 func (c *GoConn) readable() bool {
 	c.access.Lock()
 	defer c.access.Unlock()
-	return !c.dead || (c.drainable && !c.released)
+	return !(c.directionalSplice != nil && c.directionalSplice.uploadClaimed) && (!c.dead || (c.drainable && !c.released))
 }
 
 func (c *GoConn) receiveResult() error {
 	c.access.Lock()
 	defer c.access.Unlock()
+	if c.directionalSplice != nil && c.directionalSplice.uploadClaimed {
+		return net.ErrClosed
+	}
 	if c.err != nil {
 		return c.err
 	}

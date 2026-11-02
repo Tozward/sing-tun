@@ -997,6 +997,15 @@ func (e *goEngine) handleCloseRequest(conn *GoConn) {
 		e.detachConn(conn, net.ErrClosed, goDeathImmediate)
 		return
 	}
+	if !abort && e.closeDirectionalWrite(conn) {
+		conn.finPending = true
+		e.maybeSendFin(conn)
+		if !conn.dead {
+			e.armKeepalive(conn)
+			e.rearmTimer(conn)
+		}
+		return
+	}
 	if !abort && (pending != nil && pending.downloadOnly || conn.splice != nil && conn.splice.downloadOnly) {
 		e.spliceDetach(conn, net.ErrClosed)
 	}
@@ -1015,6 +1024,7 @@ func (e *goEngine) handleCloseRequest(conn *GoConn) {
 }
 
 func (e *goEngine) handleReadShut(conn *GoConn) {
+	e.closeDirectionalRead(conn)
 	if conn.dead {
 		return
 	}
@@ -1343,6 +1353,11 @@ func (e *goEngine) detachConn(conn *GoConn, err error, class uint8) {
 	conn.access.Unlock()
 	conn.deathClass = class
 	conn.state = goTCPClosed
+	if class == goDeathFinLinger {
+		// A handoff accepted before the final TCP ACK still owns buffered upload
+		// bytes. Engage it before deciding whether native receive storage can die.
+		e.handleDirectionalSpliceEngage(conn)
+	}
 	if class == goDeathFinLinger && conn.splice != nil && !conn.splice.downloadOnly && !conn.splice.uploadClosed {
 		e.spliceMarkDirty(conn)
 	} else {

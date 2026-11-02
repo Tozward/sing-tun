@@ -25,6 +25,7 @@ var goEmptyVirtioHeader [virtioNetHdrLen]byte
 type goLinuxDevice struct {
 	stack               *Go
 	vnetHeader          bool
+	plainTunHeader      bool
 	offloadProbePending atomic.Bool
 	transmitOffload     atomic.Bool
 	udpTransmitDisabled atomic.Bool
@@ -56,6 +57,7 @@ func newGoPlatformQueues(stack *Go) ([]goPlatformIO, error) {
 	}
 	device := &goLinuxDevice{stack: stack}
 	vnetHeader, err := nativeTun.vnetHeaderEnabled()
+	device.plainTunHeader = err == nil && !vnetHeader
 	if err != nil {
 		stack.logger.Warn(E.Cause(err, "go: check IFF_VNET_HDR"))
 		vnetHeader = false
@@ -483,6 +485,10 @@ func (o *goLinuxIO) transmitChecksumOffload() bool {
 
 func (o *goLinuxIO) transmitSegmentOffload() bool {
 	return o.device.transmitOffload.Load()
+}
+
+func (o *goLinuxIO) supportsTCPLocalJumbo() bool {
+	return o.device.plainTunHeader
 }
 
 func (o *goLinuxIO) armTransmitWritable(conn *GoConn) (*goBlockedWriters, error) {

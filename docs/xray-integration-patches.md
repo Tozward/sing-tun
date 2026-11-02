@@ -103,6 +103,58 @@ and lifetime regressions pass. Similar names or a bidirectional Splice API alone
 are not sufficient equivalence. Record the replacement revision and remove the
 local API only with the coordinated Xray caller update.
 
+### ST-API-002 — independently ready upload and download
+
+- Status: active local extension, not an upstream bug-fix claim.
+- Locations: `stack_go_splice_directional.go`, `stack_go_splice.go`, socket helpers
+  and the TCP close/receive/writer ownership guards.
+- Purpose: let Xray hand over its raw upload only after the final Vision padding
+  write, without waiting for download readiness. Either direction may attach first,
+  finish first or attach after the other direction reaches EOF.
+- Contract: the same comparable connected nonblocking stream socket identifies
+  both directions. Only duplicated close-on-exec descriptors are owned by this
+  API. Rejection consumes nothing. Each accepted direction has one completion
+  callback and independent counters. Original socket ownership and the existing
+  full `Splice` contract stay with their callers. Zero-interest upload sockets are
+  not polled, preventing an idle HUP loop.
+- Regressions: `TestGoDirectionalSplice*`, `TestGoKernelDirectionalSplice`, the
+  existing download/full-Splice tests, and Xray's Vision and counter tests.
+- Retirement: prefer an upstream directional handoff once these ownership,
+  readiness, half-close, backpressure and cancellation contracts pass without our
+  implementation. Update both Xray callers and dependency pins together.
+
+### ST-API-003 — borrowed vector write
+
+- Status: active local extension.
+- Location: `stack_go_tcp_write_vector.go`.
+- Purpose: enter the native writer once for an Xray multi-buffer batch. Slices are
+  borrowed synchronously and copied into the existing TCP retransmission store;
+  they are never adopted across pools or retained after the call.
+- Regressions: `TestGoWriteVector*` covers ordering, concurrent writers, partial
+  results, deadlines and close wakeup.
+- Retirement: use an equivalent upstream vector write after these tests and Xray
+  buffer-release tests pass; do not equate a retaining API with this borrowed API.
+
+### ST-PERF-001 — opt-in local TCP aggregation on plain Linux TUN
+
+- Status: active local performance extension; default is off.
+- Locations: `StackOptions.TCPLocalJumbo`, `stack_go_tcp_jumbo.go`, native Linux
+  capability detection and TCP output/loss/validated-PTB hooks.
+- Scope: Linux/Android, successfully verified plain TUN without virtio/GSO, peer
+  exactly matching a configured local TUN address. The caller must guarantee
+  delivery to this host, not forwarding or NAT onto another interface. Negotiated
+  MSS, congestion accounting units, UDP and default paths are unchanged.
+- Safety: full software checksums; payload bounded to 61440 even at maximum MTU,
+  with TCP options and during concurrent fallback. Loss, retransmission, validated
+  PTB or rejected oversized writes disable aggregation for the flow and use the
+  existing retransmission machinery.
+- Regressions: `TestGoLocalJumbo*`, `TestGoKernelLocalJumbo` (IPv4/IPv6,
+  Cubic/BBR, ordinary/vector/full-Splice writers, injected jumbo loss).
+- Retirement: compare upstream aggregation behavior and repeat checksum,
+  fallback, ownership and performance controls. Prefer upstream when equivalent;
+  keep only still-needed integration differences. Similar throughput alone does
+  not establish equivalent packet and lifetime contracts.
+
 ## Change references
 
 - ST-FD-001 through ST-FD-004: `8c6765b9b40c2f33da9925fdd48f1e06e2067df6`.

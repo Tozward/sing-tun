@@ -560,6 +560,7 @@ func (e *goEngine) markLost(conn *GoConn, descriptor *goSentDescriptor) {
 		}
 		return
 	}
+	conn.disableLocalJumbo()
 	descriptor.flags |= goDescriptorLost
 	conn.flight.lostOut++
 	conn.lost++
@@ -898,12 +899,16 @@ func (e *goEngine) xmitRetransmitQueue(conn *GoConn) {
 }
 
 func (e *goEngine) transmitRetransmit(conn *GoConn, offset uint64, length int, probe bool) int {
+	conn.disableLocalJumbo()
 	windowEnd := uint64(max(conn.windowLeft2+int64(conn.peerWindow), 0))
 	limit := min(conn.transmittedTail.Load(), windowEnd)
 	if conn.peerWindow == 0 || offset >= limit {
 		return 0
 	}
 	length = int(min(uint64(length), uint64(conn.effectiveMSS.Load()), limit-offset))
+	if conn.localJumbo {
+		length = min(length, goGSOMaxPayload)
+	}
 	for _, descriptor := range conn.scoreboard.entries {
 		if descriptor.endOffset > offset {
 			length = min(length, int(descriptor.endOffset-offset))
@@ -1007,6 +1012,11 @@ func (c *GoConn) publishPermit(ackOffset uint64) {
 }
 
 func (c *GoConn) gsoMaxSize(mss uint32) uint32 {
+	if c.localJumbo {
+		// Keep the complete packet bounded even when an in-flight aggregation
+		// decision races fallback, or the advertised MTU permits a larger MSS.
+		return min(max(goGSOMaxPayload/mss*mss, mss), goGSOMaxPayload)
+	}
 	if c.engine.platformIO.transmitSegmentOffload() {
 		return max(goGSOMaxPayload/mss*mss, mss)
 	}

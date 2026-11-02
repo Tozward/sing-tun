@@ -47,6 +47,10 @@ type goSocket struct {
 	entry  *goAFDEntry
 }
 
+func goDirectionalSocket(syscall.Conn) (goSocket, error) {
+	return goSocket{}, E.New("go: directional splice requires duplicated sockets")
+}
+
 type goAFDEntry struct {
 	ioStatusBlock windows.IO_STATUS_BLOCK
 	pollInfo      afd.PollInfo

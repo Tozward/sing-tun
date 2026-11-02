@@ -24,9 +24,9 @@ jobs:
         run: go test -c -o native-test${{ runner.os == 'Windows' && '.exe' || '' }} .
       - name: Download and ownership contracts
         if: runner.os != 'Windows'
-        run: go test -race . -run 'TestGoDownload|TestGoFullSplice|TestNativeTunConstruction|TestNativeTunExternal|TestUseSocket' -count=3 -timeout=3m
+        run: go test -race . -run 'TestGoDownload|TestGoFullSplice|TestGoDirectional|TestGoLocalJumbo|TestGoWriteVector|TestNativeTunConstruction|TestNativeTunExternal|TestUseSocket' -count=3 -timeout=3m
       - name: Linux privileged descriptor and socket regressions
         if: runner.os == 'Linux'
         run: |
           go test -race -c -o native-test .
-          sudo ./native-test -test.v -test.run 'TestNativeTunOwned|TestGoKernelDownloadSplice' -test.count=3 -test.timeout=3m
+          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-test -test.v -test.run 'TestNativeTunOwned|TestGoKernelDownloadSplice|TestGoKernelDirectionalSplice|TestGoKernelLocalJumbo' -test.count=3 -test.timeout=5m

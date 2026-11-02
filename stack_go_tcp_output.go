@@ -78,7 +78,7 @@ func (c *GoConn) WriteBuffer(buffer *buf.Buffer) error {
 func (c *GoConn) enterWriter() bool {
 	c.access.Lock()
 	defer c.access.Unlock()
-	if c.dead || c.spliced || c.splicePending != nil {
+	if c.dead || c.writeShut || (c.spliced && c.directionalSplice == nil) || c.splicePending != nil {
 		return false
 	}
 	c.writing = true
@@ -690,11 +690,14 @@ func (c *GoConn) pushDescriptors(offset uint64, length int, mss uint32, sentAt i
 
 func (c *GoConn) frameLength(pending int, mss uint32) int {
 	limit := int(mss)
-	if c.engine.platformIO.transmitSegmentOffload() {
+	if c.engine.platformIO.transmitSegmentOffload() || c.localJumboEnabled() {
 		limit = int(c.gsoMaxSize(mss))
 		if frameLimit := int(c.frameLimit.Load()); frameLimit > 0 {
 			limit = min(limit, max(frameLimit, int(mss)))
 		}
+	}
+	if c.localJumbo {
+		limit = min(limit, goGSOMaxPayload)
 	}
 	return min(pending, limit)
 }
@@ -779,6 +782,7 @@ func (c *GoConn) transmitFrame(segment *goSegment) error {
 		}
 	}
 	err := c.engine.platformIO.writeData(frame, meta, c, segment.offset+uint64(segment.length))
+	err = c.localJumboWriteResult(err, segment.length)
 	switch err {
 	case nil, errGoFrameDropped:
 		c.blockedFrame = nil

@@ -42,6 +42,11 @@ type StackOptions struct {
 	InterfaceFinder        control.InterfaceFinder
 	MemoryPressure         func() MemoryPressure
 	TCPCongestionControl   string
+	// TCPLocalJumbo permits larger TCP data packets delivered to this host's
+	// configured TUN addresses on Linux/Android. The caller must ensure these
+	// replies will not be forwarded or NATed onto another network interface.
+	// This changes neither the negotiated MSS nor UDP packet sizing.
+	TCPLocalJumbo bool
 }
 
 func NewStack(
