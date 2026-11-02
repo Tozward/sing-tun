@@ -736,8 +736,12 @@ func (c *GoConn) Close() error {
 func (c *GoConn) CloseRead() error {
 	c.access.Lock()
 	if c.dead {
-		c.access.Unlock()
-		return nil
+		// FIN-linger may still retain a backpressured directional upload.
+		// Preserve the old no-op for other already-dead connections.
+		if !c.drainable || !c.spliced || c.directionalSplice == nil || !c.directionalSplice.uploadClaimed {
+			c.access.Unlock()
+			return nil
+		}
 	}
 	c.readShut = true
 	c.access.Unlock()

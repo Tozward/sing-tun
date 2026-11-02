@@ -306,6 +306,11 @@ func (e *goEngine) closeDirectionalRead(conn *GoConn) {
 		conn.access.Unlock()
 		return
 	}
+	if conn.dead && conn.readShut && state.uploadClaimed {
+		// Cancellation also discards retained FIN-linger receive storage.
+		// CloseRead may have queued this message before the final ACK.
+		conn.drainable = false
+	}
 	pending := state.uploadPending
 	state.uploadPending = nil
 	conn.access.Unlock()

@@ -167,3 +167,34 @@ The Xray integration handoff records the exact dependency pin and final CI runs.
 Keep that record synchronized when creating a new pin. Separate these patch IDs
 even when several fixes share one commit; retire individual hunks as upstream
 resolves them, without retaining the other hunks unnecessarily.
+
+### ST-API-004 — cancel retained directional upload after native TCP completion
+
+- Status: active correction to the local directional API, not an upstream bug
+  claim. Upstream fix: not yet identified.
+- Locations: `stack_go_conn.go`, `CloseRead`, and
+  `stack_go_splice_directional.go`, `closeDirectionalRead`.
+- Reproduction: download EOF sends native FIN, but client upload remains queued
+  behind a full target socket. The final native ACK enters FIN-linger while the
+  directional API still owns that upload. Previously `CloseRead` returned without
+  cancelling it. If cancellation was queued before the ACK and handled afterwards,
+  the duplicate closed but `drainable` kept its receive storage unreclaimable.
+- Local difference: permit `CloseRead` only for an already-dead, drainable upload
+  still owned by the directional API. Cancellation clears its retained receive
+  ownership under `GoConn.access`, including the queued-before-ACK ordering. The
+  guard does not read engine-only `deathClass`. Other already-dead connections,
+  `CloseWrite`, full `Splice` and the original socket's ownership remain unchanged.
+- Regression: `TestGoDirectionalSpliceCloseReadCancelsFinLingerUpload` fails on
+  `3855ec8` for active/pending upload and cancellation before/after the final ACK.
+  It checks partial bytes, one error callback, duplicate closure, dirty-list and
+  slab reclamation, and that the original socket remains writable. The ordinary
+  dead-buffer control is
+  `TestGoDirectionalSpliceCloseReadPreservesOrdinaryDeadDrain`.
+- Local validation: macOS arm64 new close-order/concurrent-ACK cases pass with
+  `-race -count=30`; directional, download/full-Splice, lifecycle FD, local-jumbo
+  and vector-write regressions pass with `-race -count=3`. `go vet .` and Linux
+  amd64, Windows amd64 and Android arm64 test-binary compilation pass. Privileged
+  Linux runtime validation of this correction remains for the publishing CI.
+- Retirement: carry these regressions with the ST-API-002 replacement; remove
+  this correction only when an equivalent upstream API releases both the owned
+  direction and retained receive storage under the same cancellation orderings.
