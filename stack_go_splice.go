@@ -33,6 +33,14 @@ type SpliceOptions struct {
 	OnClose       N.CloseHandlerFunc
 }
 
+// DownloadSpliceOptions accounts for bytes read from the source socket into
+// this connection's send storage. OnReadDone runs once on EOF or failure; it
+// must not block the stack's engine. It does not report whole-flow completion.
+type DownloadSpliceOptions struct {
+	WriteCounters []N.CountFunc
+	OnReadDone    N.CloseHandlerFunc
+}
+
 type PacketNAT struct {
 	Origin         M.Socksaddr
 	Destination    M.Socksaddr
@@ -126,6 +134,56 @@ type goSpliceStream struct {
 	readStalled    bool
 	uploadClosed   bool
 	downloadClosed bool
+	downloadOnly   bool
+	onReadDone     N.CloseHandlerFunc
+}
+
+// SpliceDownload reads a duplicated source socket directly into the send
+// storage. The source must be a nonblocking stream socket. The caller retains
+// the original socket for writes and must stop reading it before calling this
+// method. Reads from this GoConn stay available.
+// A successful handoff permanently reserves this GoConn's write side. Source
+// read deadlines and GoConn write deadlines do not apply to engine socket IO;
+// the caller must close this GoConn to cancel an accepted handoff.
+func (c *GoConn) SpliceDownload(source syscall.Conn, options DownloadSpliceOptions) bool {
+	if source == nil || !goSpliceDuplicatesSocket || !c.engine.platformIO.supportsSockets() || !c.writeAccess.TryLock() {
+		return false
+	}
+	defer c.writeAccess.Unlock()
+	c.access.Lock()
+	eligible := c.downloadSpliceEligible()
+	c.access.Unlock()
+	if !eligible {
+		return false
+	}
+	socket, err := goSpliceSocket(source)
+	if err != nil {
+		c.engine.stack.logger.Debug(E.Cause(err, "go: download splice ", c.local))
+		return false
+	}
+	splice := &goSpliceStream{
+		conn: c, socket: socket, downloadOnly: true, onReadDone: options.OnReadDone,
+		options: SpliceOptions{WriteCounters: options.WriteCounters},
+	}
+	c.access.Lock()
+	installed := c.downloadSpliceEligible()
+	if installed {
+		c.writeShut = true
+		c.splicePending = splice
+	}
+	c.access.Unlock()
+	if !installed {
+		socket.close()
+		return false
+	}
+	c.engine.postMessage(&c.spliceMessage)
+	return true
+}
+
+// downloadSpliceEligible is called with access held and no application writer.
+func (c *GoConn) downloadSpliceEligible() bool {
+	return !c.dead && !c.userClosed && !c.abort && !c.writeShut && !c.finRequested &&
+		c.phase == goPhaseEstablished && !c.spliced && c.splicePending == nil && c.engine.engineState.Load() != goEngineExited
 }
 
 func (c *GoConn) Splice(owner SpliceSocket, options SpliceOptions) bool {
@@ -133,7 +191,7 @@ func (c *GoConn) Splice(owner SpliceSocket, options SpliceOptions) bool {
 		return false
 	}
 	c.access.Lock()
-	eligible := !c.dead && c.phase == goPhaseEstablished && !c.spliced && c.splicePending == nil
+	eligible := !c.dead && !c.writeShut && !c.finRequested && c.phase == goPhaseEstablished && !c.spliced && c.splicePending == nil
 	c.access.Unlock()
 	if !eligible {
 		return false
@@ -152,7 +210,7 @@ func (c *GoConn) Splice(owner SpliceSocket, options SpliceOptions) bool {
 	}
 	splice.socket = socket
 	c.access.Lock()
-	installed := !c.dead && !c.spliced && c.splicePending == nil
+	installed := !c.dead && !c.writeShut && !c.finRequested && !c.spliced && c.splicePending == nil
 	if installed {
 		c.splicePending = splice
 	}
@@ -187,9 +245,18 @@ func (e *goEngine) handleSpliceEngage(conn *GoConn) {
 		e.spliceRelease(splice, conn.closeError())
 		return
 	}
+	if splice.downloadOnly {
+		conn.access.Lock()
+		cancelled := conn.userClosed || conn.abort || conn.finRequested
+		conn.access.Unlock()
+		if cancelled {
+			e.spliceRelease(splice, net.ErrClosed)
+			return
+		}
+	}
 	splice.token = e.allocateSpliceToken(conn, nil)
 	var err error
-	if goSpliceDuplicatesSocket {
+	if goSpliceDuplicatesSocket && !splice.downloadOnly {
 		err = splice.original.Close()
 	}
 	if err == nil {
@@ -206,11 +273,20 @@ func (e *goEngine) handleSpliceEngage(conn *GoConn) {
 	conn.access.Lock()
 	conn.spliced = true
 	conn.access.Unlock()
-	e.spliceFlushUpload(conn)
+	if !splice.downloadOnly {
+		e.spliceFlushUpload(conn)
+	}
 }
 
 func (e *goEngine) spliceRelease(splice *goSpliceStream, err error) {
 	splice.socket.close()
+	if splice.downloadOnly {
+		if done := splice.onReadDone; done != nil {
+			splice.onReadDone = nil
+			done(err)
+		}
+		return
+	}
 	splice.owner.Detach()
 	splice.owner.Close()
 	if splice.options.OnClose != nil {
@@ -285,7 +361,7 @@ func (e *goEngine) spliceSetInterest(conn *GoConn, interest uint8) {
 }
 
 func (e *goEngine) handleStreamEvent(conn *GoConn, event goSocketEvent) {
-	if event.writable && conn.splice != nil {
+	if event.writable && conn.splice != nil && !conn.splice.downloadOnly {
 		conn.splice.blocked = false
 		e.spliceFlushUpload(conn)
 	}
@@ -306,6 +382,9 @@ func (e *goEngine) spliceDeliver(conn *GoConn, data []byte) {
 
 func (e *goEngine) spliceMarkDirty(conn *GoConn) {
 	splice := conn.splice
+	if splice.downloadOnly {
+		return
+	}
 	if splice.dirty {
 		return
 	}
@@ -328,6 +407,9 @@ func (e *goEngine) flushSpliceDirty() {
 
 func (e *goEngine) spliceFlushUpload(conn *GoConn) {
 	splice := conn.splice
+	if splice.downloadOnly {
+		return
+	}
 	for !splice.blocked {
 		consumed := conn.consumedTail.Load()
 		available := conn.receiveAvailable.Load()
@@ -371,7 +453,7 @@ func (e *goEngine) spliceFlushUpload(conn *GoConn) {
 
 func (e *goEngine) spliceCheckUpload(conn *GoConn) {
 	splice := conn.splice
-	if splice.uploadClosed || !conn.finReceived || conn.receiveAvailable.Load() > conn.consumedTail.Load() {
+	if splice.downloadOnly || splice.uploadClosed || !conn.finReceived || conn.receiveAvailable.Load() > conn.consumedTail.Load() {
 		return
 	}
 	splice.socket.shutdownWrite()
@@ -381,7 +463,7 @@ func (e *goEngine) spliceCheckUpload(conn *GoConn) {
 
 func (e *goEngine) spliceAfterInput(conn *GoConn) {
 	splice := conn.splice
-	if splice == nil {
+	if splice == nil || splice.downloadOnly {
 		return
 	}
 	if conn.receiveAvailable.Load() > conn.consumedTail.Load() || (conn.finReceived && !splice.uploadClosed) {
@@ -418,6 +500,10 @@ func (e *goEngine) spliceReadPeer(conn *GoConn) {
 		}
 		switch {
 		case errno == 0 && n == 0:
+			if splice.downloadOnly {
+				e.finishDownloadRead(conn, splice)
+				return
+			}
 			splice.downloadClosed = true
 			e.spliceSetInterest(conn, splice.interest&^goInterestRead)
 			if conn.splice == nil {
@@ -440,6 +526,25 @@ func (e *goEngine) spliceReadPeer(conn *GoConn) {
 	}
 	e.maybeSendFin(conn)
 	e.spliceMaybeFinish(conn)
+}
+
+func (e *goEngine) finishDownloadRead(conn *GoConn, splice *goSpliceStream) {
+	// Finish the downstream half independently: upload remains with the caller
+	// and must not wait for this connection's FIN or the source socket to close.
+	done := splice.onReadDone
+	splice.onReadDone = nil
+	conn.access.Lock()
+	conn.finRequested = true
+	conn.access.Unlock()
+	conn.finPending = true
+	e.spliceDetach(conn, nil)
+	// Linux may still have buffered data waiting for the native transmitter.
+	// Resume its ordinary path after detaching the engine socket reader.
+	conn.transmitPublished()
+	e.maybeSendFin(conn)
+	if done != nil {
+		done(nil)
+	}
 }
 
 func (e *goEngine) spliceTransmit(conn *GoConn) bool {
@@ -478,7 +583,7 @@ func (e *goEngine) spliceResume(conn *GoConn) {
 
 func (e *goEngine) spliceMaybeFinish(conn *GoConn) {
 	splice := conn.splice
-	if splice == nil || !splice.uploadClosed || !splice.downloadClosed || !conn.finSent {
+	if splice == nil || splice.downloadOnly || !splice.uploadClosed || !splice.downloadClosed || !conn.finSent {
 		return
 	}
 	e.spliceDetach(conn, nil)

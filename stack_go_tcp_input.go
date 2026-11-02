@@ -656,7 +656,7 @@ func (e *goEngine) deliverInOrder(conn *GoConn, data []byte) {
 		conn.publishReceiveWindow()
 		return
 	}
-	if conn.splice != nil {
+	if conn.splice != nil && !conn.splice.downloadOnly {
 		e.spliceDeliver(conn, data)
 		return
 	}
@@ -979,7 +979,8 @@ func (e *goEngine) maybeSendFin(conn *GoConn) {
 
 func (e *goEngine) handleCloseRequest(conn *GoConn) {
 	conn.access.Lock()
-	abort := conn.abort || conn.splicePending != nil
+	pending := conn.splicePending
+	abort := conn.abort || pending != nil && !pending.downloadOnly
 	discard := conn.userClosed || conn.abort
 	if conn.dead && discard {
 		conn.drainable = false
@@ -995,6 +996,9 @@ func (e *goEngine) handleCloseRequest(conn *GoConn) {
 	if conn.state == goTCPSynSent {
 		e.detachConn(conn, net.ErrClosed, goDeathImmediate)
 		return
+	}
+	if !abort && (pending != nil && pending.downloadOnly || conn.splice != nil && conn.splice.downloadOnly) {
+		e.spliceDetach(conn, net.ErrClosed)
 	}
 	if abort || conn.splice != nil {
 		e.sendReset(conn)
@@ -1339,7 +1343,7 @@ func (e *goEngine) detachConn(conn *GoConn, err error, class uint8) {
 	conn.access.Unlock()
 	conn.deathClass = class
 	conn.state = goTCPClosed
-	if class == goDeathFinLinger && conn.splice != nil && !conn.splice.uploadClosed {
+	if class == goDeathFinLinger && conn.splice != nil && !conn.splice.downloadOnly && !conn.splice.uploadClosed {
 		e.spliceMarkDirty(conn)
 	} else {
 		e.spliceDetach(conn, err)
