@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -345,11 +346,12 @@ func TestGoDirectionalSpliceCloseRace(t *testing.T) {
 
 func TestGoDirectionalSpliceUploadBackpressure(t *testing.T) {
 	conn, _ := newDownloadSpliceTestConn(t)
-	source, peer := downloadSpliceSocketPair(t)
+	// A local stream socket makes send-buffer exhaustion deterministic without
+	// also testing TCP's small-receive-window update and persist timers. Those
+	// timers differ across Linux and Darwin and can outlast this engine unit
+	// test's deadline even while a real TCP receiver is making progress.
+	source, peer := directionalSpliceUnixSocketPair(t)
 	if err := source.SetWriteBuffer(4096); err != nil {
-		t.Fatal(err)
-	}
-	if err := peer.SetReadBuffer(1024); err != nil {
 		t.Fatal(err)
 	}
 	var counted atomic.Int64
@@ -366,18 +368,27 @@ func TestGoDirectionalSpliceUploadBackpressure(t *testing.T) {
 	conn.engine.acceptFin(conn)
 	conn.engine.spliceAfterInput(conn)
 	conn.engine.flushSpliceDirty()
-	if conn.splice == nil || !conn.splice.blocked || counted.Load() >= int64(len(payload)) || len(done) != 0 {
+	if conn.splice == nil || !conn.splice.blocked || counted.Load() <= 0 || counted.Load() >= int64(len(payload)) || len(done) != 0 {
 		t.Fatal("upload did not retain queued bytes under socket backpressure")
 	}
 	readDone := make(chan error, 1)
+	readerExited := make(chan struct{})
 	go func() {
+		defer close(readerExited)
 		got := make([]byte, len(payload))
 		_, err := io.ReadFull(peer, got)
 		if err == nil && !bytes.Equal(got, payload) {
 			err = errors.New("backpressured upload bytes differ")
 		}
+		if err == nil {
+			var one [1]byte
+			if _, eof := peer.Read(one[:]); !errors.Is(eof, io.EOF) {
+				err = errors.New("backpressured upload did not send FIN after queued bytes")
+			}
+		}
 		readDone <- err
 	}()
+	defer func() { _ = peer.Close(); <-readerExited }()
 	directionalSpliceWait(t, func() bool { return len(done) > 0 }, func() {
 		conn.engine.handleStreamEvent(conn, goSocketEvent{writable: true})
 	})
@@ -385,6 +396,43 @@ func TestGoDirectionalSpliceUploadBackpressure(t *testing.T) {
 	if err := <-readDone; err != nil || counted.Load() != int64(len(payload)) {
 		t.Fatalf("backpressured upload count=%d: %v", counted.Load(), err)
 	}
+	conn.engine.handleStreamEvent(conn, goSocketEvent{writable: true})
+	if len(done) != 0 || conn.splice != nil || conn.spliced {
+		t.Fatal("completed upload retained socket state or completed twice")
+	}
+}
+
+func directionalSpliceUnixSocketPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
+	t.Helper()
+	// Match os/exec's fork lock while setting close-on-exec on platforms where
+	// SOCK_CLOEXEC is unavailable. net.FileConn then makes its own owned dup.
+	syscall.ForkLock.RLock()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err == nil {
+		unix.CloseOnExec(fds[0])
+		unix.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := [2]*os.File{os.NewFile(uintptr(fds[0]), "splice-source"), os.NewFile(uintptr(fds[1]), "splice-peer")}
+	for _, file := range files {
+		defer file.Close()
+	}
+	var conns [2]*net.UnixConn
+	for index, file := range files {
+		conn, err := net.FileConn(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		conns[index] = conn.(*net.UnixConn)
+		if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return conns[0], conns[1]
 }
 
 func TestGoDirectionalSplicePendingUploadDrainsAtGracefulClose(t *testing.T) {
